@@ -14,14 +14,19 @@
 #define BLE_FACTORY_RESET_ENABLE       0 //If 1, the BLE device will factory reset and will revert any custom device name you've programmed into it. Avoid this unless something's really gone wrong in the BLE chip.
 #define MINIMUM_FIRMWARE_VERSION  "0.7.0"
 
-int xPin = A1;
-int yPin = A2;
-int zPin = A3;
+int xPin = A2;
+int yPin = A1;
+int zPin = A0;
 
 #define ADC_MAX 1024
+
+#define ACCELEROMETER_MIN 400
+#define ACCELEROMETER_MAX 650
+#define ACCELEROMETER_RANGE (ACCELEROMETER_MAX - ACCELEROMETER_MIN)
+
 #define PITCH_MAX 16383
 int xValRaw, yValRaw, zValRaw;
-int xValNorm, yValNorm, zValNorm;
+float xValNorm, yValNorm, zValNorm;
 
 void readRawValues()
 {
@@ -32,24 +37,42 @@ void readRawValues()
 
 void normalize()
 {
+  /*
   xValNorm = ((float)xValRaw / ADC_MAX);
   yValNorm = ((float)yValRaw / ADC_MAX);
   zValNorm = ((float)zValRaw / ADC_MAX);
+  */
+  xValNorm = ((float)(xValRaw-ACCELEROMETER_MIN) / ACCELEROMETER_RANGE);
+  if (xValNorm < 0.0) xValNorm = 0.0;
+  if (xValNorm > 1.0) xValNorm = 1.0;
+  
+  yValNorm = ((float)(yValRaw-ACCELEROMETER_MIN) / ACCELEROMETER_RANGE);
+  if (yValNorm < 0.0) yValNorm = 0.0;
+  if (yValNorm > 1.0) yValNorm = 1.0;
+  
+  zValNorm = ((float)(zValRaw-ACCELEROMETER_MIN) / ACCELEROMETER_RANGE);
+  if (zValNorm < 0.0) zValNorm = 0.0;
+  if (zValNorm > 1.0) zValNorm = 1.0;
 }
 
 Adafruit_BluefruitLE_SPI ble(BLUEFRUIT_SPI_CS, BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_RST);
 Adafruit_BLEMIDI midi(ble);
 Adafruit_MPR121 cap = Adafruit_MPR121();
 
+int base_notes[4] = {pitchC3, pitchC4, pitchC5, pitchC6};
+
 int current_note = pitchC4;
 int new_note = current_note;
+
+int base_note = base_notes[0];
+int new_base_note = base_note;
 
 uint16_t current_bend = 0;
 uint16_t new_bend = current_bend;
 
 unsigned long curr_time = 0;
-unsigned long last_analog_update_time = 0;
-unsigned long analog_update_millis = 100;
+unsigned long last_note_on_time = 0;
+unsigned long max_note_on_time = 5000;
 
 bool isConnected = false;
 
@@ -146,23 +169,6 @@ void setup_ble_midi()
   Serial.println(F("Waiting for BLE connection..."));
 }
 
-void setup_accelerometer()
-{
-  // Default address is 0x5A, if tied to 3.3V its 0x5B
-  // If tied to SDA its 0x5C and if SCL then 0x5D
-  if (!cap.begin(0x5A))
-  {
-    while (1)
-    {
-      Serial.println("Capacitive touch sensor not found. I can't continue.");
-      delay(2000);
-    }
-  }
-  Serial.println("Capacitive touch sensor found.");
-
-  reset_max_filtered_vals();
-}
-
 void setup(void)
 {
   delay(500);
@@ -171,8 +177,6 @@ void setup(void)
 #ifndef DEBUG_MODE //No BLE activity in debug mode. Only sensor readings.  
   setup_ble_midi();
 #endif
-
-  setup_accelerometer();
 }
 
 void loop(void)
@@ -195,11 +199,18 @@ void loop(void)
   normalize();
   
 #ifdef DEBUG_MODE
-  Serial.print("X: "); Serial.print(xValNorm); Serial.print(" ("); Serial.print(xValRaw); Serial.println(")\n");
-  Serial.print("Y: "); Serial.print(yValNorm); Serial.print(" ("); Serial.print(yValRaw); Serial.println(")\n");
-  Serial.print("Z: "); Serial.print(zValNorm); Serial.print(" ("); Serial.print(zValRaw); Serial.println(")\n");
-  delay(250);
+  //Serial.print("X: "); Serial.print(xValNorm); Serial.print(" ("); Serial.print(xValRaw); Serial.println(")");
+  //Serial.print("Y: "); Serial.print(yValNorm); Serial.print(" ("); Serial.print(yValRaw); Serial.println(")");
+  //Serial.print("Z: "); Serial.print(zValNorm); Serial.print(" ("); Serial.print(zValRaw); Serial.println(")\n");
+  Serial.print(xValNorm);Serial.print(",");Serial.print(yValNorm);Serial.print(",");Serial.println(zValNorm);
+  delay(100);
 #else
+
+  new_base_note = base_notes[(int)(4 * zValNorm)];
+  if (new_base_note != base_note)
+  {
+    base_note = new_base_note;
+  }
 
   new_bend = (uint16_t)(PITCH_MAX * yValNorm);
   if (new_bend != current_bend)
@@ -208,13 +219,20 @@ void loop(void)
     pitchBend(current_bend);
   }
 
-  new_note = (int)(16 * xValNorm) + pitchC4; //Map the stretch value to a range of 16 notes, beginning at C4
+  new_note = (int)(16 * xValNorm) + base_note; //Map the stretch value to a range of 16 notes, beginning at C4
   if (new_note != current_note)
   {
+    noteOff(0, current_note, 64);
     current_note = new_note;
     noteOn(0, current_note, 64);
-    delay(50);
-    noteOff(0, current_note, 64);
+    //delay(50);
+  }
+  else
+  {
+    if ((last_note_on_time - curr_time) > max_note_on_time)
+    {
+      noteOff(0, current_note, 64);
+    }
   }
   delay(100);
 
